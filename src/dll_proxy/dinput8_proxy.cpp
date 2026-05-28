@@ -1,5 +1,6 @@
 #include "dinput8_proxy.h"
 #include <Windows.h>
+#include <objbase.h>
 
 static HMODULE s_realDinput8 = nullptr;
 

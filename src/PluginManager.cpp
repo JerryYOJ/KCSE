@@ -113,9 +113,13 @@ void SetCurrentPluginHandle(PluginHandle handle) { s_currentPluginHandle = handl
 
 static void ScanDirectory(const fs::path& dir)
 {
-    if (!fs::exists(dir))
+    spdlog::info("Scanning: {}", dir.string());
+    if (!fs::exists(dir)) {
+        spdlog::info("  Directory does not exist, skipping");
         return;
+    }
 
+    int fileCount = 0;
     for (auto& entry : fs::directory_iterator(dir)) {
         if (!entry.is_regular_file())
             continue;
@@ -124,10 +128,12 @@ static void ScanDirectory(const fs::path& dir)
 
         auto path = entry.path().string();
         auto filename = entry.path().filename().string();
+        ++fileCount;
+        spdlog::info("  Found DLL: {}", filename);
 
         HMODULE hTemp = LoadLibraryA(path.c_str());
         if (!hTemp) {
-            spdlog::warn("Failed to load {}: error {}", filename, GetLastError());
+            spdlog::warn("  Failed to load {}: error {}", filename, GetLastError());
             continue;
         }
 
@@ -135,6 +141,7 @@ static void ScanDirectory(const fs::path& dir)
             GetProcAddress(hTemp, "KCSEPlugin_Version"));
 
         if (!versionData) {
+            spdlog::info("  {} has no KCSEPlugin_Version export, skipping", filename);
             FreeLibrary(hTemp);
             continue;
         }
@@ -158,11 +165,14 @@ static void ScanDirectory(const fs::path& dir)
         plugin.handle = s_nextHandle++;
         plugin.hModule = hTemp;
 
-        spdlog::info("Found plugin: {} v{} by {}", plugin.name, plugin.version.pluginVersion, plugin.version.author);
+        spdlog::info("  Registered plugin: {} v{} by {}", plugin.name, plugin.version.pluginVersion, plugin.version.author);
 
         s_plugins.push_back(std::move(plugin));
         s_listeners.resize(s_nextHandle);
     }
+
+    if (!fileCount)
+        spdlog::info("  No DLLs found in directory");
 }
 
 bool Init()
@@ -174,16 +184,24 @@ bool Init()
 
     auto modsDir = gameRoot / "mods";
     if (fs::exists(modsDir)) {
+        spdlog::info("Searching mods directory: {}", modsDir.string());
+        int modCount = 0;
         for (auto& modDir : fs::directory_iterator(modsDir)) {
             if (!modDir.is_directory())
                 continue;
+            ++modCount;
+            spdlog::info("  Mod folder: {}", modDir.path().filename().string());
             ScanDirectory(modDir.path() / "KCSE" / "Plugins");
         }
+        if (!modCount)
+            spdlog::info("  No mod folders found");
+    } else {
+        spdlog::info("No mods directory at {}", modsDir.string());
     }
 
     ScanDirectory(gameRoot / "KCSE" / "Plugins");
 
-    spdlog::info("Scanned {} plugins", s_plugins.size());
+    spdlog::info("Total plugins found: {}", s_plugins.size());
     return true;
 }
 

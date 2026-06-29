@@ -5,47 +5,72 @@
 #include "TaskInterface.h"
 #include "KCSE/Trampoline.h"
 #include "Offsets/Offsets.h"
+#include "REL.h"
 #include <Windows.h>
-#include <vector>
+#include <string>
+#include <string_view>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 
 uint32_t g_kcseVersion = 1;
 uint32_t g_gameVersion = 0;
 
-static uint32_t DetectGameVersion()
+namespace {
+
+std::string NarrowACP(const std::wstring& w)
 {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-
-    DWORD handle = 0;
-    DWORD size = GetFileVersionInfoSizeA(exePath, &handle);
-    if (!size) return 0;
-
-    std::vector<uint8_t> buffer(size);
-    if (!GetFileVersionInfoA(exePath, handle, size, buffer.data())) return 0;
-
-    VS_FIXEDFILEINFO* info = nullptr;
-    UINT len = 0;
-    if (!VerQueryValueA(buffer.data(), "\\", reinterpret_cast<void**>(&info), &len)) return 0;
-
-    return (HIWORD(info->dwFileVersionMS) << 24) |
-           (LOWORD(info->dwFileVersionMS) << 16) |
-           (HIWORD(info->dwFileVersionLS) << 8)  |
-            LOWORD(info->dwFileVersionLS);
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_ACP, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_ACP, 0, w.c_str(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
 }
 
-static void MainThread(HMODULE hModule)
+// "1.9.8" -> 0x01090800 (major<<24 | minor<<16 | patch<<8). 0 if unparsable.
+uint32_t PackVersion(std::string_view v)
 {
-    auto logger = spdlog::basic_logger_mt("KCSE", "KCSE/KCSE.log", true);
+    uint32_t parts[3] = { 0, 0, 0 };
+    int idx = 0;
+    for (char c : v) {
+        if (c == '.') { if (++idx >= 3) break; }
+        else if (c >= '0' && c <= '9') parts[idx] = parts[idx] * 10 + static_cast<uint32_t>(c - '0');
+        else break;
+    }
+    return (parts[0] << 24) | ((parts[1] & 0xFF) << 16) | ((parts[2] & 0xFF) << 8);
+}
+
+}  // namespace
+
+static void MainThread(HMODULE)
+{
+    // REL::Module requires WHGame.dll to be mapped; wait for it before any REL:: use.
+    while (!GetModuleHandleW(L"WHGame.dll"))
+        Sleep(50);
+
+    auto& mod = REL::Module::get();
+
+    // Logs + address library live under <game_root>\KCSE\ (not Bin\Win64).
+    const std::wstring kcseDir = mod.game_root() + L"\\KCSE";
+    const std::wstring logDir = kcseDir + L"\\logs";
+    CreateDirectoryW(kcseDir.c_str(), nullptr);
+    CreateDirectoryW(logDir.c_str(), nullptr);
+
+    auto logger = spdlog::basic_logger_mt("KCSE", NarrowACP(logDir + L"\\KCSE.log"), true);
     spdlog::set_default_logger(logger);
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
     spdlog::flush_on(spdlog::level::info);
 
-    g_gameVersion = DetectGameVersion();
-    spdlog::info("Initializing v{} (game {}.{}.{}.{})", g_kcseVersion,
-        (g_gameVersion >> 24) & 0xFF, (g_gameVersion >> 16) & 0xFF,
-        (g_gameVersion >> 8) & 0xFF, g_gameVersion & 0xFF);
+    // The PE version is stale (1.9.7 on 1.9.8) -- report the real version from the
+    // game's own config (wh_sys_version / whdlversions.txt), keyed by distribution.
+    std::string rel{ mod.release() };       if (rel.empty()) rel = "?";
+    std::string build{ mod.build_code() };  if (build.empty()) build = "?";
+    g_gameVersion = PackVersion(mod.release());
+    spdlog::info("KCSE v{} | {} | version {} | build {} | ts 0x{:08X}",
+        g_kcseVersion, REL::to_string(mod.distribution()), rel, build, mod.timestamp());
+
+    // Force the address library to load now -> clean, early failure on GOG/Epic if
+    // the per-distribution table is missing (identity no-op on Steam).
+    (void)REL::IDDatabase::get();
 
     while (!Offsets::GetCCryAction())
         Sleep(100);
